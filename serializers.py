@@ -39,6 +39,14 @@ class BaseWorkflowFormSerializer(serializers.ModelSerializer):
             fields['workflow_id'].required = False
         return fields
 
+    def to_representation(self, instance):
+        representation = super().to_representation(instance)
+        workflow_id = None
+        if hasattr(instance, 'manufacturing_process') and instance.manufacturing_process:
+            workflow_id = instance.manufacturing_process.id
+        representation['workflow_id'] = workflow_id
+        return representation
+
     def create(self, validated_data):
         # Pop the 'workflow_id' to prevent it from being passed to the model constructor,
         # where it would cause a TypeError.
@@ -103,11 +111,20 @@ class FormShieldWeaverSettingsSerializer(serializers.ModelSerializer):
 
 class DeviceSettingsRelatedField(serializers.RelatedField):
     """A custom field to handle the generic relationship for device settings."""
+    
     def to_representation(self, value):
-        if isinstance(value, FormExtruderSettings): return FormExtruderSettingsSerializer(value).data
-        if isinstance(value, FormFiberWeaverSettings): return FormFiberWeaverSettingsSerializer(value).data
-        if isinstance(value, FormRadiantSettings): return FormRadiantSettingsSerializer(value).data
-        if isinstance(value, FormShieldWeaverSettings): return FormShieldWeaverSettingsSerializer(value).data
+        if value is None:
+            return None
+            
+        if isinstance(value, FormExtruderSettings): 
+            return FormExtruderSettingsSerializer(value).data
+        if isinstance(value, FormFiberWeaverSettings): 
+            return FormFiberWeaverSettingsSerializer(value).data
+        if isinstance(value, FormRadiantSettings): 
+            return FormRadiantSettingsSerializer(value).data
+        if isinstance(value, FormShieldWeaverSettings): 
+            return FormShieldWeaverSettingsSerializer(value).data
+        
         raise Exception('Unexpected type of settings object')
 
 # --- Lookups & Helper Serializers ---
@@ -262,22 +279,79 @@ class DeviceAuthorizationSerializer(BaseWorkflowFormSerializer):
     stage = serializers.ReadOnlyField(source='manufacturing_process.stage', read_only=True)
     current_step = serializers.ReadOnlyField(source='manufacturing_process.current_step', read_only=True)
     
+    # Explicitly define ForeignKey fields with proper representation
+    product = ProductSerializer(read_only=True)
+    customer = CustomerSerializer(read_only=True) 
+    unshared_fields = UnsharedFieldStructureSerializer(read_only=True)
+    form_name = WireFormNameSerializer(read_only=True)
+    
+    # Write-only fields for IDs during creation/update
+    product_id = serializers.PrimaryKeyRelatedField(
+        queryset=Product.objects.all(), source='product', write_only=True, required=False, allow_null=True
+    )
+    customer_id = serializers.PrimaryKeyRelatedField(
+        queryset=Customer.objects.all(), source='customer', write_only=True, required=False, allow_null=True
+    )
+    unshared_fields_id = serializers.PrimaryKeyRelatedField(
+        queryset=UnsharedFieldStructure.objects.all(), source='unshared_fields', write_only=True, required=False, allow_null=True
+    )
+    form_name_id = serializers.PrimaryKeyRelatedField(
+        queryset=WireFormName.objects.all(), source='form_name', write_only=True, required=False, allow_null=True
+    )
+    
     class Meta:
         model = DeviceAuthorization
-        fields = '__all__' 
+        fields = [
+            'id', 'workflow_id', 'document_code', 'license_number', 'trace_date', 
+            'trace_code', 'description', 'unshared_fields', 'unshared_fields_id',
+            'form_name', 'form_name_id', 'product', 'product_id', 'customer', 'customer_id',
+            'device_settings', 'license_production', 'raw_material_specifications', 
+            'packaging', 'stage', 'current_step'
+        ]
+        # Exclude internal GenericForeignKey fields from API
+        extra_kwargs = {
+            'settings_content_type': {'write_only': True},
+            'settings_object_id': {'write_only': True},
+        }
 
     def create(self, validated_data):
+        # Handle nested objects
         license_data = validated_data.pop('license_production', None)
         specs_data = validated_data.pop('raw_material_specifications', [])
         packaging_data = validated_data.pop('packaging', None)
         
-        # This now calls the fixed create method in the base class
+        # Create the main instance
         instance = super().create(validated_data)
         
-        if license_data: LicenseProduction.objects.create(authorization=instance, **license_data)
-        if packaging_data: Packaging.objects.create(authorization=instance, **packaging_data)
-        for spec in specs_data: RawMaterialSpecifications.objects.create(authorization=instance, **spec)
+        # Create nested objects
+        if license_data: 
+            LicenseProduction.objects.create(authorization=instance, **license_data)
+        if packaging_data: 
+            Packaging.objects.create(authorization=instance, **packaging_data)
+        for spec in specs_data: 
+            RawMaterialSpecifications.objects.create(authorization=instance, **spec)
         
+        return instance
+
+    def update(self, instance, validated_data):
+        # Handle nested objects
+        license_data = validated_data.pop('license_production', None)
+        specs_data = validated_data.pop('raw_material_specifications', None)
+        packaging_data = validated_data.pop('packaging', None)
+
+        # Update the main instance
+        instance = super().update(instance, validated_data)
+
+        # Update nested objects
+        if license_data:
+            LicenseProduction.objects.update_or_create(authorization=instance, defaults=license_data)
+        if packaging_data:
+            Packaging.objects.update_or_create(authorization=instance, defaults=packaging_data)
+        if specs_data is not None:
+            instance.raw_material_specifications.all().delete()
+            for spec in specs_data:
+                RawMaterialSpecifications.objects.create(authorization=instance, **spec)
+
         return instance
 
 class DeviceRawMaterialSerializer(QcTestWireableModelSerializerMixin, BaseWorkflowFormSerializer):
