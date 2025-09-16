@@ -40,21 +40,6 @@ class LicenseProduction(models.Model):
         return f"License {self.setup_license_number}"
 
 
-# class DeviceSettings(models.Model):
-#     authorization = models.OneToOneField(DeviceAuthorization, on_delete=models.CASCADE, related_name='device_settings')
-    
-#     unshared_fields = models.ForeignKey(
-#         'wire.UnsharedFieldStructure', 
-#         on_delete=models.SET_NULL, 
-#         related_name='device_settings',
-#         null=True, 
-#         blank=True
-#     )
-
-#     def __str__(self):
-#         return f"Settings for {self.authorization}"
-
-
 class RawMaterialSpecifications(models.Model):
     authorization = models.ForeignKey(DeviceAuthorization, on_delete=models.CASCADE, related_name='raw_material_specifications')
 

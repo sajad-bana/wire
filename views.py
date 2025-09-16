@@ -1,95 +1,107 @@
 # apps/wire/views.py
-from rest_framework import viewsets, filters
+from rest_framework import viewsets, mixins, serializers
 from rest_framework.permissions import IsAuthenticated
+from rest_framework.views import APIView
+from rest_framework.decorators import action
+from rest_framework.response import Response
+from rest_framework import status
 from drf_spectacular.utils import extend_schema, OpenApiExample
-from .models import *
-from .dir_classes.wire_abstract_class import *
-from .dir_classes.device_settings import *
-from .dir_classes.production_qc_settings import (
-    ProductionExtruderQcTestWire, ProductionRadiantQcTestWire,
-    ProductionFiberWeaverQcTestWire, ProductionShieldWeaverQcTestWire
+from django.core.exceptions import PermissionDenied
+from rest_framework.exceptions import ValidationError
+
+
+# Correctly and explicitly import all necessary models from their specific files
+from .models import (
+    DeviceRawMaterial, DeviceAuthorization, DeviceChecklist, DeviceProduction, DeviceProduct,
+    WireManufacturingProcess
+)
+# Import lookup models from their specific location
+from .dir_classes.wire_abstract_class import (
+    UnsharedFieldStructure, QcTestWireDefinition, Material, CoatingMaterial, WireFormName
 )
 
 from .serializers import (
-    DeviceRawMaterialSerializer, DeviceAuthorizationSerializer, DeviceChecklistSerializer,
-    DeviceProductionSerializer, 
-    DeviceProductSerializer,
-    QcTestWireDefinitionSerializer, UnsharedFieldStructureSerializer,
+    UnsharedFieldStructureSerializer, QcTestWireDefinitionSerializer,
     MaterialSerializer, CoatingMaterialSerializer, WireFormNameSerializer,
+    DeviceRawMaterialSerializer, DeviceAuthorizationSerializer, DeviceChecklistSerializer,
+    DeviceProductionSerializer, DeviceProductSerializer, WireManufacturingProcessSerializer,
     FormExtruderSettingsSerializer, FormFiberWeaverSettingsSerializer, FormRadiantSettingsSerializer, FormShieldWeaverSettingsSerializer
 )
-from .permissions import IsAdminOrReadOnly, IsManagerOrAdmin, IsOperator
 from .pagination import CustomPagination
+from .services import ManufacturingWorkflowService
+from .permissions import IsSuperUser, CanCreateFormForStage, CanUpdateFormForStage
 
+# --- Lookups ViewSets (Restored) ---
 
-# Lookups-----------------------------------------------------
 @extend_schema(tags=['Wire - Lookups'])
 class UnsharedFieldStructureViewSet(viewsets.ModelViewSet):
     queryset = UnsharedFieldStructure.objects.order_by('pk').all()
     serializer_class = UnsharedFieldStructureSerializer
-    permission_classes = [IsManagerOrAdmin]
+    permission_classes = [IsAuthenticated]
     pagination_class = CustomPagination
-    filter_backends = [filters.SearchFilter]
-    search_fields = ['name']
-
 
 @extend_schema(tags=['Wire - Lookups'])
 class QcTestWireDefinitionViewSet(viewsets.ModelViewSet):
     queryset = QcTestWireDefinition.objects.order_by('pk').all()
     serializer_class = QcTestWireDefinitionSerializer
-    permission_classes = [IsManagerOrAdmin]
+    permission_classes = [IsAuthenticated]
     pagination_class = CustomPagination
-    filter_backends = [filters.SearchFilter] 
-    search_fields = ['test_table']
-
 
 @extend_schema(tags=['Wire - Lookups'])
 class MaterialViewSet(viewsets.ModelViewSet):
     queryset = Material.objects.order_by('pk').all()
     serializer_class = MaterialSerializer
-    permission_classes = [IsManagerOrAdmin]
+    permission_classes = [IsAuthenticated]
     pagination_class = CustomPagination
-
 
 @extend_schema(tags=['Wire - Lookups'])
 class CoatingMaterialViewSet(viewsets.ModelViewSet):
     queryset = CoatingMaterial.objects.order_by('pk').all()
     serializer_class = CoatingMaterialSerializer
-    permission_classes = [IsManagerOrAdmin]
+    permission_classes = [IsAuthenticated]
     pagination_class = CustomPagination
-
 
 @extend_schema(tags=['Wire - Lookups'])
 class WireFormNameViewSet(viewsets.ModelViewSet):
     queryset = WireFormName.objects.order_by('pk').all()
     serializer_class = WireFormNameSerializer
-    permission_classes = [IsManagerOrAdmin]
+    permission_classes = [IsAuthenticated]
     pagination_class = CustomPagination
 
 
-# Forms-----------------------------------------------------
+# --- Form ViewSets with Workflow Permissions ---
+
+class BaseWorkflowViewSet(viewsets.ModelViewSet):
+    """
+    Base ViewSet for forms that are part of the master workflow.
+    It links form creation/updates to the master process.
+    """
+    pagination_class = CustomPagination
+    
+    def get_permissions(self):
+        if self.action == 'create':
+            self.permission_classes = [CanCreateFormForStage]
+        elif self.action in ['update', 'partial_update']:
+            self.permission_classes = [CanUpdateFormForStage]
+        else:
+            self.permission_classes = [IsAuthenticated]
+        return super().get_permissions()
+
+    # The conflicting create method has been removed. 
+    # The default behavior from ModelViewSet will now be used, 
+    # which correctly calls the custom create method in the serializer.
+
+
 @extend_schema(tags=['Wire - Forms'])
-class DeviceRawMaterialViewSet(viewsets.ModelViewSet):
-    queryset = DeviceRawMaterial.objects.select_related(
-        'form_name', 'product', 'customer', 'unshared_fields'
-    ).prefetch_related('qc_tests_wire').order_by('pk').all()
+class DeviceRawMaterialViewSet(BaseWorkflowViewSet):
+    queryset = DeviceRawMaterial.objects.all()
     serializer_class = DeviceRawMaterialSerializer
-    permission_classes = [IsManagerOrAdmin]
     pagination_class = CustomPagination
 
-
 @extend_schema(tags=['Wire - Forms'])
-class DeviceAuthorizationViewSet(viewsets.ModelViewSet):
-    queryset = DeviceAuthorization.objects.select_related(
-        'form_name', 'product', 'customer', 'unshared_fields',
-        'license_production', 'packaging'
-    ).prefetch_related(
-        'device_settings',
-        'raw_material_specifications',
-        'raw_material_specifications__unshared_fields'
-    ).order_by('pk').all()
+class DeviceAuthorizationViewSet(BaseWorkflowViewSet):
+    queryset = DeviceAuthorization.objects.all()
     serializer_class = DeviceAuthorizationSerializer
-    permission_classes = [IsAdminOrReadOnly]
     pagination_class = CustomPagination
 
     @extend_schema(
@@ -99,6 +111,7 @@ class DeviceAuthorizationViewSet(viewsets.ModelViewSet):
                 summary='Creating DeviceAuthorization with Extruder settings',
                 description='Example for form_name="Extruder" with specific device settings.',
                 value={
+                    "workflow_id": 1,
                     "form_name": 1,
                     "document_code": "AUTH-2025-001",
                     "license_number": "LIC-EXT-123",
@@ -164,6 +177,7 @@ class DeviceAuthorizationViewSet(viewsets.ModelViewSet):
                 summary='Creating DeviceAuthorization with Radiant settings',
                 description='Example for form_name="Radiant" with specific device settings.',
                 value={
+                    "workflow_id": 1,
                     "form_name": 2,
                     "document_code": "AUTH-2025-002",
                     "license_number": "LIC-RAD-123",
@@ -202,6 +216,7 @@ class DeviceAuthorizationViewSet(viewsets.ModelViewSet):
                 summary='Creating DeviceAuthorization with ShieldWeaver settings',
                 description='Example for form_name="ShieldWeaver" with specific device settings.',
                 value={
+                    "workflow_id": 1,
                     "form_name": 3,
                     "document_code": "AUTH-2025-003",
                     "license_number": "LIC-SW-123",
@@ -238,6 +253,7 @@ class DeviceAuthorizationViewSet(viewsets.ModelViewSet):
                 summary='Creating DeviceAuthorization with FiberWeaver settings',
                 description='Example for form_name="FiberWeaver" with specific device settings.',
                 value={
+                    "workflow_id": 1,
                     "form_name": 4,
                     "document_code": "AUTH-2025-004",
                     "license_number": "LIC-FW-123",
@@ -283,6 +299,7 @@ class DeviceAuthorizationViewSet(viewsets.ModelViewSet):
                 summary='Full DeviceAuthorization with all nested data',
                 description='Complete example including packaging and raw material specifications.',
                 value={
+                    "workflow_id": 1,
                     "form_name": 1,
                     "document_code": "AUTH-2025-005",
                     "license_number": "LIC-FULL-123",
@@ -356,7 +373,6 @@ class DeviceAuthorizationViewSet(viewsets.ModelViewSet):
             )
         ]
     )
-
     def create(self, request, *args, **kwargs):
         return super().create(request, *args, **kwargs)
 
@@ -391,488 +407,92 @@ class DeviceAuthorizationViewSet(viewsets.ModelViewSet):
             authorization.device_settings = settings_instance
             authorization.save()
 
-
 @extend_schema(tags=['Wire - Forms'])
-class DeviceChecklistViewSet(viewsets.ModelViewSet):
-    queryset = DeviceChecklist.objects.select_related(
-        'form_name', 'product', 'customer', 'unshared_fields'
-    ).prefetch_related('qc_tests_wire').order_by('pk').all()
+class DeviceChecklistViewSet(BaseWorkflowViewSet):
+    queryset = DeviceChecklist.objects.all()
     serializer_class = DeviceChecklistSerializer
-    permission_classes = [IsManagerOrAdmin]  # Fixed permission logic
     pagination_class = CustomPagination
 
-
 @extend_schema(tags=['Wire - Forms'])
-class DeviceProductionViewSet(viewsets.ModelViewSet):
-    queryset = DeviceProduction.objects.select_related(
-        'form_name', 'product'
-    ).prefetch_related(
-        'production_wastes',
-        'productions',  # Changed from 'production__production_qc_tests_wire' to 'productions'
-        'productions__production_qc_test'  # Added to prefetch QC tests
-    ).order_by('pk').all()
+class DeviceProductionViewSet(BaseWorkflowViewSet):
+    queryset = DeviceProduction.objects.all()
     serializer_class = DeviceProductionSerializer
-    permission_classes = [IsManagerOrAdmin]
     pagination_class = CustomPagination
-
-    @extend_schema(
-        examples=[
-            OpenApiExample(
-                'Extruder Production Example',
-                summary='Creating DeviceProduction with Extruder QC tests',
-                description='Example for form_name="Extruder" with production as an array.',
-                value={
-                    "form_name": 1,
-                    "document_code": "PROD-2025-001",
-                    "license_number": "LIC-EXT-PROD-123",
-                    "trace_date": "2025-09-15",
-                    "trace_code": "TRACE-EXT-PROD-456",
-                    "description": "Production authorization for extruder cable manufacturing",
-                    "product_id": 1,
-                    "unshared_fields_id": 1,
-                    "production": [
-                        {
-                            "operator_name": "John Smith",
-                            "start_date": "2025-09-15",
-                            "end_date": "2025-09-16",
-                            "input_spool_length": "5000m",
-                            "input_spool_number": "SP-EXT-001",
-                            "output_spool_length": "4850m",
-                            "output_spool_number": "SP-EXT-OUT-001",
-                            "input_tank_number": "TANK-EXT-01",
-                            "output_tank_number": "TANK-EXT-02",
-                            "input_spool_remaining_length": "150m",
-                            "operator_approval": True,
-                            "quality_control_approval": True,
-                            "description": "First shift extruder production run",
-                            "production_qc_test": {
-                                "sample_approval": True,
-                                "wire_diameter": True,
-                                "noise_diameter_fluctuation": False,
-                                "spark": True,
-                                "bump": True,
-                                "surface_smoothness": True,
-                                "connection_test": True,
-                                "die_size": True,
-                                "nozzle_size": True,
-                                "temperature": True,
-                                "operator_approval": True,
-                                "quality_control_approval": True,
-                                "description": "All extruder QC tests passed for first shift"
-                            }
-                        },
-                        {
-                            "operator_name": "Jane Doe",
-                            "start_date": "2025-09-16",
-                            "end_date": "2025-09-17",
-                            "input_spool_length": "4500m",
-                            "input_spool_number": "SP-EXT-002",
-                            "output_spool_length": "4350m",
-                            "output_spool_number": "SP-EXT-OUT-002",
-                            "input_tank_number": "TANK-EXT-02",
-                            "output_tank_number": "TANK-EXT-03",
-                            "input_spool_remaining_length": "150m",
-                            "operator_approval": True,
-                            "quality_control_approval": True,
-                            "description": "Second shift extruder production run",
-                            "production_qc_test": {
-                                "sample_approval": True,
-                                "wire_diameter": True,
-                                "noise_diameter_fluctuation": True,
-                                "spark": True,
-                                "bump": False,
-                                "surface_smoothness": True,
-                                "connection_test": True,
-                                "die_size": True,
-                                "nozzle_size": True,
-                                "temperature": True,
-                                "operator_approval": True,
-                                "quality_control_approval": True,
-                                "description": "Second shift QC tests passed"
-                            }
-                        }
-                    ],
-                    "production_wastes": [
-                        {
-                            "waste_type": "Copper Scrap",
-                            "waste_amount": "5.2kg"
-                        },
-                        {
-                            "waste_type": "Insulation Waste",
-                            "waste_amount": "2.8kg"
-                        },
-                        {
-                            "waste_type": "PVC Pellets Waste",
-                            "waste_amount": "1.5kg"
-                        }
-                    ]
-                }
-            ),
-            OpenApiExample(
-                'Radiant Production Example',
-                summary='Creating DeviceProduction with Radiant QC tests',
-                description='Example for form_name="Radiant" with production as an array.',
-                value={
-                    "form_name": 2,
-                    "document_code": "PROD-2025-002",
-                    "license_number": "LIC-RAD-PROD-123",
-                    "trace_date": "2025-09-15",
-                    "trace_code": "TRACE-RAD-PROD-456",
-                    "description": "Production authorization for radiant cable manufacturing",
-                    "product_id": 2,
-                    "unshared_fields_id": 2,
-                    "production": [
-                        {
-                            "operator_name": "Sarah Wilson",
-                            "start_date": "2025-09-15",
-                            "end_date": "2025-09-16",
-                            "input_spool_length": "3000m",
-                            "input_spool_number": "SP-RAD-001",
-                            "output_spool_length": "2900m",
-                            "output_spool_number": "SP-RAD-OUT-001",
-                            "input_tank_number": "TANK-RAD-01",
-                            "output_tank_number": "TANK-RAD-02",
-                            "input_spool_remaining_length": "100m",
-                            "operator_approval": True,
-                            "quality_control_approval": True,
-                            "description": "Morning shift radiant production",
-                            "production_qc_test": {
-                                "pretwist_connection_test": True,
-                                "cable_strand_count_control": True,
-                                "cable_appearance_control": True,
-                                "teflon_tape_not_broken": True,
-                                "cable_layout_control": True,
-                                "product_connection_test": True,
-                                "operator_approval": True,
-                                "quality_control_approval": True,
-                                "description": "All radiant QC tests passed for morning shift"
-                            }
-                        },
-                        {
-                            "operator_name": "Tom Brown",
-                            "start_date": "2025-09-16",
-                            "end_date": "2025-09-17",
-                            "input_spool_length": "2800m",
-                            "input_spool_number": "SP-RAD-002",
-                            "output_spool_length": "2700m",
-                            "output_spool_number": "SP-RAD-OUT-002",
-                            "input_tank_number": "TANK-RAD-02",
-                            "output_tank_number": "TANK-RAD-03",
-                            "input_spool_remaining_length": "100m",
-                            "operator_approval": True,
-                            "quality_control_approval": False,
-                            "description": "Evening shift radiant production - needs review",
-                            "production_qc_test": {
-                                "pretwist_connection_test": True,
-                                "cable_strand_count_control": False,
-                                "cable_appearance_control": True,
-                                "teflon_tape_not_broken": True,
-                                "cable_layout_control": True,
-                                "product_connection_test": True,
-                                "operator_approval": True,
-                                "quality_control_approval": False,
-                                "description": "Cable strand count control failed - needs recheck"
-                            }
-                        },
-                        {
-                            "operator_name": "Mike Johnson",
-                            "start_date": "2025-09-17",
-                            "end_date": "2025-09-18",
-                            "input_spool_length": "3200m",
-                            "input_spool_number": "SP-RAD-003",
-                            "output_spool_length": "3100m",
-                            "output_spool_number": "SP-RAD-OUT-003",
-                            "input_tank_number": "TANK-RAD-03",
-                            "output_tank_number": "TANK-RAD-04",
-                            "input_spool_remaining_length": "100m",
-                            "operator_approval": True,
-                            "quality_control_approval": True,
-                            "description": "Night shift radiant production",
-                            "production_qc_test": {
-                                "pretwist_connection_test": True,
-                                "cable_strand_count_control": True,
-                                "cable_appearance_control": True,
-                                "teflon_tape_not_broken": True,
-                                "cable_layout_control": True,
-                                "product_connection_test": True,
-                                "operator_approval": True,
-                                "quality_control_approval": True,
-                                "description": "Perfect night shift - all tests passed"
-                            }
-                        }
-                    ],
-                    "production_wastes": [
-                        {
-                            "waste_type": "Strip Material Waste",
-                            "waste_amount": "3.1kg"
-                        },
-                        {
-                            "waste_type": "Teflon Tape Waste",
-                            "waste_amount": "0.8kg"
-                        }
-                    ]
-                }
-            ),
-            OpenApiExample(
-                'FiberWeaver Production Example',
-                summary='Creating DeviceProduction with FiberWeaver QC tests',
-                description='Example for form_name="FiberWeaver" with production as an array.',
-                value={
-                    "form_name": 3,
-                    "document_code": "PROD-2025-003",
-                    "license_number": "LIC-FW-PROD-123",
-                    "trace_date": "2025-09-15",
-                    "trace_code": "TRACE-FW-PROD-456",
-                    "description": "Production authorization for fiber weaver manufacturing",
-                    "product_id": 3,
-                    "unshared_fields_id": 3,
-                    "production": [
-                        {
-                            "operator_name": "Alice Cooper",
-                            "start_date": "2025-09-15",
-                            "end_date": "2025-09-16",
-                            "input_spool_length": "4000m",
-                            "input_spool_number": "SP-FW-001",
-                            "output_spool_length": "3850m",
-                            "output_spool_number": "SP-FW-OUT-001",
-                            "input_tank_number": "TANK-FW-01",
-                            "output_tank_number": "TANK-FW-02",
-                            "input_spool_remaining_length": "150m",
-                            "operator_approval": True,
-                            "quality_control_approval": True,
-                            "description": "First shift fiber weaver production",
-                            "production_qc_test": {
-                                "tissue_density_control": "85% density maintained throughout production",
-                                "no_tearing_fraying": True,
-                                "no_tissue_dirt": True,
-                                "gear_control": True,
-                                "machine_speed": True,
-                                "operator_approval": True,
-                                "quality_control_approval": True,
-                                "description": "All fiber weaver QC tests passed for first shift"
-                            }
-                        },
-                        {
-                            "operator_name": "Bob Martinez",
-                            "start_date": "2025-09-16",
-                            "end_date": "2025-09-17",
-                            "input_spool_length": "3500m",
-                            "input_spool_number": "SP-FW-002",
-                            "output_spool_length": "3400m",
-                            "output_spool_number": "SP-FW-OUT-002",
-                            "input_tank_number": "TANK-FW-02",
-                            "output_tank_number": "TANK-FW-03",
-                            "input_spool_remaining_length": "100m",
-                            "operator_approval": True,
-                            "quality_control_approval": False,
-                            "description": "Second shift fiber weaver production - quality issues",
-                            "production_qc_test": {
-                                "tissue_density_control": "75% density - below specification",
-                                "no_tearing_fraying": False,
-                                "no_tissue_dirt": True,
-                                "gear_control": True,
-                                "machine_speed": False,
-                                "operator_approval": True,
-                                "quality_control_approval": False,
-                                "description": "Density and tearing issues detected - needs rework"
-                            }
-                        }
-                    ],
-                    "production_wastes": [
-                        {
-                            "waste_type": "Fiber Material Waste",
-                            "waste_amount": "2.7kg"
-                        },
-                        {
-                            "waste_type": "Defective Tissue Waste",
-                            "waste_amount": "1.9kg"
-                        }
-                    ]
-                }
-            ),
-            OpenApiExample(
-                'ShieldWeaver Production Example',
-                summary='Creating DeviceProduction with ShieldWeaver QC tests',
-                description='Example for form_name="ShieldWeaver" with production as an array.',
-                value={
-                    "form_name": 4,
-                    "document_code": "PROD-2025-004",
-                    "license_number": "LIC-SW-PROD-123",
-                    "trace_date": "2025-09-15",
-                    "trace_code": "TRACE-SW-PROD-456",
-                    "description": "Production authorization for shield weaver manufacturing",
-                    "product_id": 4,
-                    "unshared_fields_id": 4,
-                    "production": [
-                        {
-                            "operator_name": "Carol Davis",
-                            "start_date": "2025-09-15",
-                            "end_date": "2025-09-16",
-                            "input_spool_length": "3500m",
-                            "input_spool_number": "SP-SW-001",
-                            "output_spool_length": "3400m",
-                            "output_spool_number": "SP-SW-OUT-001",
-                            "input_tank_number": "TANK-SW-01",
-                            "output_tank_number": "TANK-SW-02",
-                            "input_spool_remaining_length": "100m",
-                            "operator_approval": True,
-                            "quality_control_approval": True,
-                            "description": "First shift shield weaver production",
-                            "production_qc_test": {
-                                "appearance": "Excellent - no visible defects, uniform weave pattern",
-                                "weave_density": "90% - within specifications (88-92%)",
-                                "number_wire_strands": "24 strands counted and verified",
-                                "connection_test": "All connections secure and tested at 150% load",
-                                "final_length": "3400m measured and verified",
-                                "operator_approval": True,
-                                "quality_control_approval": True,
-                                "description": "Perfect first shift - all shield weaver QC tests passed"
-                            }
-                        },
-                        {
-                            "operator_name": "David Wilson",
-                            "start_date": "2025-09-16",
-                            "end_date": "2025-09-17",
-                            "input_spool_length": "3200m",
-                            "input_spool_number": "SP-SW-002",
-                            "output_spool_length": "3100m",
-                            "output_spool_number": "SP-SW-OUT-002",
-                            "input_tank_number": "TANK-SW-02",
-                            "output_tank_number": "TANK-SW-03",
-                            "input_spool_remaining_length": "100m",
-                            "operator_approval": True,
-                            "quality_control_approval": True,
-                            "description": "Second shift shield weaver production",
-                            "production_qc_test": {
-                                "appearance": "Good - minor surface variations within tolerance",
-                                "weave_density": "89% - acceptable within range",
-                                "number_wire_strands": "24 strands confirmed",
-                                "connection_test": "All connections passed standard tests",
-                                "final_length": "3100m verified",
-                                "operator_approval": True,
-                                "quality_control_approval": True,
-                                "description": "Good second shift production"
-                            }
-                        },
-                        {
-                            "operator_name": "Eva Rodriguez",
-                            "start_date": "2025-09-17",
-                            "end_date": "2025-09-18",
-                            "input_spool_length": "2800m",
-                            "input_spool_number": "SP-SW-003",
-                            "output_spool_length": "2650m",
-                            "output_spool_number": "SP-SW-OUT-003",
-                            "input_tank_number": "TANK-SW-03",
-                            "output_tank_number": "TANK-SW-04",
-                            "input_spool_remaining_length": "150m",
-                            "operator_approval": False,
-                            "quality_control_approval": False,
-                            "description": "Third shift shield weaver production - issues detected",
-                            "production_qc_test": {
-                                "appearance": "Poor - visible gaps and uneven weave density",
-                                "weave_density": "78% - below minimum specification of 85%",
-                                "number_wire_strands": "22 strands - 2 strands missing",
-                                "connection_test": "Connection failed at 120% load test",
-                                "final_length": "2650m - significant waste detected",
-                                "operator_approval": False,
-                                "quality_control_approval": False,
-                                "description": "Multiple failures - production rejected, needs investigation"
-                            }
-                        }
-                    ],
-                    "production_wastes": [
-                        {
-                            "waste_type": "Wire Strand Waste",
-                            "waste_amount": "4.5kg"
-                        },
-                        {
-                            "waste_type": "Shield Material Waste",
-                            "waste_amount": "3.2kg"
-                        },
-                        {
-                            "waste_type": "Defective Weave Waste",
-                            "waste_amount": "2.8kg"
-                        }
-                    ]
-                }
-            ),
-            OpenApiExample(
-                'Complete Mixed Production Example',
-                summary='Comprehensive production example with all possible fields',
-                description='Complete example showing all available fields and nested relationships for Extruder form.',
-                value={
-                    "form_name": 1,
-                    "document_code": "PROD-2025-COMPLETE-001",
-                    "license_number": "LIC-COMPLETE-PROD-456",
-                    "trace_date": "2025-09-15",
-                    "trace_code": "TRACE-COMPLETE-789",
-                    "description": "Complete comprehensive production authorization example with all fields",
-                    "product_id": 1,
-                    "customer_id": 1,
-                    "unshared_fields_id": 1,
-                    "production": [
-                        {
-                            "operator_name": "Senior Operator John Smith",
-                            "start_date": "2025-09-15",
-                            "end_date": "2025-09-16",
-                            "input_spool_length": "10000m",
-                            "input_spool_number": "SP-COMPLETE-INPUT-001",
-                            "output_spool_length": "9750m",
-                            "output_spool_number": "SP-COMPLETE-OUTPUT-001",
-                            "input_tank_number": "TANK-COMPLETE-IN-A1",
-                            "output_tank_number": "TANK-COMPLETE-OUT-B1",
-                            "input_spool_remaining_length": "250m",
-                            "operator_approval": True,
-                            "quality_control_approval": True,
-                            "description": "Comprehensive high-volume production run with full quality checks and monitoring",
-                            "production_qc_test": {
-                                "sample_approval": True,
-                                "wire_diameter": True,
-                                "noise_diameter_fluctuation": False,
-                                "spark": True,
-                                "bump": True,
-                                "surface_smoothness": True,
-                                "connection_test": True,
-                                "die_size": True,
-                                "nozzle_size": True,
-                                "temperature": True,
-                                "operator_approval": True,
-                                "quality_control_approval": True,
-                                "description": "Comprehensive QC testing completed - all parameters within specification limits, excellent production quality achieved"
-                            }
-                        }
-                    ],
-                    "production_wastes": [
-                        {
-                            "waste_type": "Premium Copper Scrap",
-                            "waste_amount": "15.7kg"
-                        },
-                        {
-                            "waste_type": "High-Grade Insulation Waste",
-                            "waste_amount": "8.3kg"
-                        },
-                        {
-                            "waste_type": "PVC Pellets Waste",
-                            "waste_amount": "4.2kg"
-                        },
-                        {
-                            "waste_type": "Packaging Material Waste",
-                            "waste_amount": "2.1kg"
-                        }
-                    ]
-                }
-            )
-        ]
-    )
-    def create(self, request, *args, **kwargs):
-        return super().create(request, *args, **kwargs)
-
 
 @extend_schema(tags=['Wire - Forms'])
-class DeviceProductViewSet(viewsets.ModelViewSet):
-    queryset = DeviceProduct.objects.select_related(
-        'form_name', 'product',# 'customer', 'unshared_fields', 'production'
-    ).order_by('pk').all()
+class DeviceProductViewSet(BaseWorkflowViewSet):
+    queryset = DeviceProduct.objects.all()
     serializer_class = DeviceProductSerializer
-    permission_classes = [IsAdminOrReadOnly]
     pagination_class = CustomPagination
+
+
+# --- Master Workflow API Views (Refactored to simple APIViews) ---
+
+@extend_schema(tags=['Wire - Master Workflow'])
+class StartManufacturingProcessView(APIView):
+    """Starts a new master manufacturing process."""
+    permission_classes = [IsAuthenticated]
+
+    @extend_schema(summary="Start a new master manufacturing process", request=None, responses={201: WireManufacturingProcessSerializer})
+    def post(self, request, *args, **kwargs):
+        service = ManufacturingWorkflowService(user=request.user)
+        process = service.start_process()
+        serializer = WireManufacturingProcessSerializer(process)
+        return Response(serializer.data, status=status.HTTP_201_CREATED)
+
+@extend_schema(tags=['Wire - Master Workflow'])
+class ManufacturingProcessDetailView(APIView):
+    """Retrieve or delete a master manufacturing process."""
+    permission_classes = [IsAuthenticated]
+
+    def get_permissions(self):
+        if self.request.method == 'DELETE':
+            return [IsSuperUser()]
+        return super().get_permissions()
+
+    @extend_schema(summary="Get the status of a specific manufacturing process", responses={200: WireManufacturingProcessSerializer})
+    def get(self, request, pk, *args, **kwargs):
+        try:
+            process = WireManufacturingProcess.objects.get(pk=pk)
+            serializer = WireManufacturingProcessSerializer(process)
+            return Response(serializer.data)
+        except WireManufacturingProcess.DoesNotExist:
+            return Response({"detail": "Not found."}, status=status.HTTP_404_NOT_FOUND)
+
+    @extend_schema(summary="Delete a master process (Superuser only)")
+    def delete(self, request, pk, *args, **kwargs):
+        service = ManufacturingWorkflowService(user=request.user)
+        try:
+            service.delete_process(process_id=pk)
+            return Response(status=status.HTTP_204_NO_CONTENT)
+        except ValidationError as e:
+            return Response({"detail": str(e)}, status=status.HTTP_404_NOT_FOUND)
+
+
+class PerformActionPayloadSerializer(serializers.Serializer):
+    action = serializers.ChoiceField(choices=['approve', 'reject'])
+    comment = serializers.CharField(required=False, allow_blank=True)
+
+@extend_schema(tags=['Wire - Master Workflow'])
+class PerformProcessActionView(APIView):
+    """Approve or reject a step in the master workflow."""
+    permission_classes = [IsAuthenticated]
+
+    @extend_schema(summary="Approve or reject a step in the master workflow", request=PerformActionPayloadSerializer, responses={200: WireManufacturingProcessSerializer})
+    def post(self, request, pk, *args, **kwargs):
+        serializer = PerformActionPayloadSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        
+        service = ManufacturingWorkflowService(user=request.user)
+        try:
+            updated_process = service.approve_or_reject_step(
+                process_id=pk,
+                **serializer.validated_data
+            )
+            response_serializer = WireManufacturingProcessSerializer(updated_process)
+            return Response(response_serializer.data)
+        except (ValidationError, PermissionDenied) as e:
+            return Response({"detail": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+        except WireManufacturingProcess.DoesNotExist:
+            return Response({"detail": "Not found."}, status=status.HTTP_404_NOT_FOUND)
+

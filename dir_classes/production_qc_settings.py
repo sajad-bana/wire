@@ -9,9 +9,9 @@ class BaseProductionQcTestWire(models.Model):
         on_delete=models.CASCADE,
         related_name='%(class)s_qc_tests'
     )
-    operator_approval = models.BooleanField(default=False, blank=True, null=True)
-    quality_control_approval = models.BooleanField(default=False, blank=True, null=True)
-    description = models.TextField(blank=True, null=True)
+    # operator_approval = models.BooleanField(default=False, blank=True, null=True)
+    # quality_control_approval = models.BooleanField(default=False, blank=True, null=True)
+    # description = models.TextField(blank=True, null=True)
 
     class Meta:
         abstract = True
